@@ -94,66 +94,78 @@ class ViralPredictionSystem:
             dict với training metrics
         """
         print("\n" + "="*70)
-        print("🚀 STARTING END-TO-END TRAINING PIPELINE")
+        print("STARTING END-TO-END TRAINING PIPELINE")
         print("="*70)
 
         # ── Bước 0: Load data ─────────────────────────────────────────────
-        print("\n📦 Bước 0: Loading BigQuery data...")
+        print("\nStep 0: Loading BigQuery data...")
         channel_df, engagement_df, video_df = self._bq_loader.load_all()
 
         if channel_df.empty:
             raise RuntimeError("Không tải được int_channel_summary — kiểm tra BigQuery connection.")
 
-        # ── Bước 0b: Create labels ────────────────────────────────────────
-        print("\n🏷️  Bước 0b: Creating labels...")
-        labeled_channel = self._channel_label_creator.create_labels(channel_df)
+        # ── Bước 0b: Video labels (không phụ thuộc clustering) ───────────
+        print("\nStep 0b: Creating labels...")
         labeled_video = self._video_label_creator.create_labels(engagement_df, video_df)
 
-        # ── Bước 1: Feature engineering ───────────────────────────────────
-        print("\n⚙️  Bước 1: Feature engineering...")
-        self._channel_fe.fit(labeled_channel)
-        # Truyền video_df để tính avg_views chính xác từ per-video data
-        channel_features = self._channel_fe.transform(labeled_channel, video_df)
+        # ── Bước 1: Feature engineering kênh (không cần labels) ──────────
+        print("\nStep 1: Feature engineering...")
+        self._channel_fe.fit(channel_df)
+        channel_features = self._channel_fe.transform(channel_df, video_df)
 
-        # Thêm label vào features
-        if "is_viral_channel" in labeled_channel.columns:
-            channel_features["is_viral_channel"] = labeled_channel["is_viral_channel"].values
+        # ── Bước 2a: Cluster để xác định tier → dùng làm within-cluster threshold ──
+        print("\nStep 2: Channel clustering...")
+        self._clusterer.fit(
+            channel_features,
+            labeled_df=None,          # chưa có labels, tính viral_rate sau
+            auto_find_k=auto_find_k,
+        )
 
+        # Lấy cluster id tạm cho từng kênh
+        prelim_results = [
+            self._clusterer.assign_cluster(channel_features.iloc[[i]])
+            for i in range(len(channel_features))
+        ]
+        prelim_cluster_ids = [r[0] for r in prelim_results]
+
+        # ── Bước 0b': Channel labels (within-cluster) ─────────────────────
+        labeled_channel = self._channel_label_creator.create_labels(
+            channel_df, cluster_ids=prelim_cluster_ids
+        )
+
+        # Gắn labels vào channel_features
+        channel_features["is_viral_channel"] = labeled_channel["is_viral_channel"].values
+
+        # ── Bước 2b: Cập nhật cluster stats với viral rates + per-feat percentiles ─
+        # Gán cluster_id + cluster_distance vào channel_features
+        cluster_results = [
+            self._clusterer.assign_cluster(channel_features.iloc[[i]])
+            for i in range(len(channel_features))
+        ]
+        channel_features["cluster_id"]       = [r[0] for r in cluster_results]
+        channel_features["cluster_distance"] = [r[1] for r in cluster_results]
+
+        # update_stats_with_labels recomputes cluster stats (viral rates + percentiles)
+        self._clusterer.update_stats_with_labels(channel_features)
+        self._clusterer._print_cluster_summary(channel_features)
+
+        # ── Video features + labels ───────────────────────────────────────
         self._video_fe.fit(engagement_df, video_df)
         video_features = self._video_fe.transform(engagement_df, video_df)
-
-        # Thêm labels vào video features
         for label_col in ["is_viral", "time_window_label"]:
             if label_col in labeled_video.columns:
-                # Merge on video_id
                 if "video_id" in video_features.columns and "video_id" in labeled_video.columns:
                     label_series = labeled_video.set_index("video_id")[label_col]
                     video_features[label_col] = video_features["video_id"].map(label_series)
                 else:
                     video_features[label_col] = labeled_video[label_col].values[:len(video_features)]
 
-        # ── Bước 2: Clustering ────────────────────────────────────────────
-        print("\n🔗 Bước 2: Channel clustering...")
-        self._clusterer.fit(
-            channel_features,
-            labeled_df=channel_features,
-            auto_find_k=auto_find_k,
-        )
-
-        # Thêm cluster features vào channel_features
-        cluster_results = [
-            self._clusterer.assign_cluster(channel_features.iloc[[i]])
-            for i in range(len(channel_features))
-        ]
-        channel_features["cluster_id"] = [r[0] for r in cluster_results]
-        channel_features["cluster_distance"] = [r[1] for r in cluster_results]
-
         # ── Bước 3: Train Model A ─────────────────────────────────────────
-        print("\n🤖 Bước 3: Training Model A (Channel Classifier)...")
+        print("\nStep 3: Training Model A (Channel Classifier)...")
         model_a_results = self._model_a.train(channel_features)
 
         # ── Bước 4: Train Model B ─────────────────────────────────────────
-        print("\n🤖 Bước 4: Training Model B (Video Classifier)...")
+        print("\nStep 4: Training Model B (Video Classifier)...")
         model_b_results = self._model_b.train(video_features)
 
         # ── Fit explainer ─────────────────────────────────────────────────
@@ -171,7 +183,7 @@ class ViralPredictionSystem:
         }
 
         print("\n" + "="*70)
-        print("✅ TRAINING HOÀN THÀNH!")
+        print("TRAINING COMPLETE!")
         print(f"   Model A (LOOCV): accuracy={model_a_results.get('accuracy', 0):.3f}, "
               f"F1={model_a_results.get('f1', 0):.3f}")
         print(f"   Model B1 (CV F1): {model_b_results.get('b1', {}).get('cv_f1', 0):.3f}")
@@ -194,7 +206,7 @@ class ViralPredictionSystem:
         self._check_trained()
         api = self._get_api_client()
 
-        print(f"\n🔍 Đang phân tích kênh: {channel_name}")
+        print(f"\nAnalyzing channel: {channel_name}")
 
         # ── Fetch từ YouTube API ───────────────────────────────────────────
         data = api.get_channel_data_full(channel_name)
@@ -245,6 +257,14 @@ class ViralPredictionSystem:
         recent_trend = float(features["f11_recent_trend"].iloc[0]) if "f11_recent_trend" in features.columns else 1.0
 
         # ── Build report ──────────────────────────────────────────────────
+        # Benchmark % dùng within-cluster percentile:
+        within_cluster_pct = self._clusterer.get_within_cluster_percentile(
+            cluster_id, "f6_avg_views", avg_views
+        )
+        # Fallback sang global nếu cluster chưa có dữ liệu
+        if within_cluster_pct == 50.0:
+            within_cluster_pct = self._channel_fe.get_percentile_rank("f6_avg_views", avg_views)
+
         return self._ChannelReport(
             input_name=channel_name,
             channel_id=channel_stats["channel_id"],
@@ -259,9 +279,7 @@ class ViralPredictionSystem:
             like_ratio=float(features.get("f2_loyalty", pd.Series([0])).iloc[0]),
             comment_ratio=float(features.get("f3_depth", pd.Series([0])).iloc[0]),
             recent_trend=recent_trend,
-            percentile_vs_benchmark=self._channel_fe.get_percentile_rank(
-                "f6_avg_views", avg_views
-            ),
+            percentile_vs_benchmark=within_cluster_pct,
         )
 
     # ── Video Prediction ───────────────────────────────────────────────────────
@@ -283,7 +301,7 @@ class ViralPredictionSystem:
         self._check_trained()
         api = self._get_api_client()
 
-        print(f"\n🎬 Đang phân tích video — kênh: {channel_name}")
+        print(f"\nAnalyzing video - channel: {channel_name}")
 
         # ── Fetch channel info ────────────────────────────────────────────
         channel_info = api.search_channel(channel_name)
@@ -295,7 +313,7 @@ class ViralPredictionSystem:
             if not videos:
                 raise ValueError(f"Không tìm thấy video nào của kênh '{channel_name}'")
             video_id = videos[0]["video_id"]
-            print(f"  → Video mới nhất: {video_id}")
+            print(f"  Latest video: {video_id}")
 
         video_stats_dict = api.get_video_stats([video_id])
         if video_id not in video_stats_dict:
@@ -335,7 +353,15 @@ class ViralPredictionSystem:
         channel_avg = self._video_fe.get_channel_avg(channel_stats["channel_id"])
         if channel_avg == 0:
             channel_avg = channel_stats.get("total_views", 1) / max(channel_stats.get("video_count", 1), 1)
-        vs_avg_pct = (video_data.get("views", 0) - channel_avg) / max(channel_avg, 1) * 100
+
+        # So sánh dựa trên velocity (views/giờ) thay vì raw views,
+        # tránh sai lệch với video còn non (2-3 ngày tuổi vs avg lifetime 90 ngày)
+        channel_hourly_avg = channel_avg / (30 * 24)  # views/giờ kỳ vọng
+        velocity_ratio = views_per_hour / max(channel_hourly_avg, 1)
+        vs_avg_pct = (velocity_ratio - 1) * 100  # +X% = nhanh hơn X% so với pace trung bình
+
+        # Percentile từ velocity: ratio=1 → top 50%, ratio=2 → top 75%
+        channel_percentile = int(min(99, max(1, 50 * min(velocity_ratio, 2))))
 
         return self._VideoReport(
             video_id=video_id,
@@ -347,7 +373,7 @@ class ViralPredictionSystem:
             current_views=video_data.get("views", 0),
             views_per_hour=views_per_hour,
             vs_channel_avg_pct=vs_avg_pct,
-            channel_percentile=int(min(99, max(1, (vs_avg_pct + 100) / 2))),
+            channel_percentile=channel_percentile,
             explanation=explanation,
             projected_views=projected,
         )
@@ -368,7 +394,7 @@ class ViralPredictionSystem:
         with open(TRAINED_MODELS_DIR / "explainer.pkl", "wb") as f:
             pickle.dump(self._explainer, f)
 
-        print(f"\n✅ Tất cả models đã lưu vào: {TRAINED_MODELS_DIR}")
+        print(f"\nModels saved to: {TRAINED_MODELS_DIR}")
 
     @classmethod
     def load(cls) -> "ViralPredictionSystem":
@@ -396,7 +422,7 @@ class ViralPredictionSystem:
         system._ChannelReport = ChannelReport
         system._VideoReport = VideoReport
 
-        print("✅ ViralPredictionSystem đã load từ trained_models/")
+        print("ViralPredictionSystem loaded from trained_models/")
         return system
 
     # ── Helpers ────────────────────────────────────────────────────────────────
@@ -455,7 +481,7 @@ class ViralPredictionSystem:
             # Cập nhật label nếu vượt ngưỡng
             if boosted >= 0.6 and prediction.get("will_viral") is False:
                 prediction["will_viral"] = True
-                prediction["label"] = "🔥 CÓ KHẢ NĂNG VIRAL"
+                prediction["label"] = "VIRAL POTENTIAL"
             # Cập nhật time_window nếu còn not_viral
             if prediction.get("time_window") == "not_viral" and boosted >= 0.65:
                 prediction["time_window"] = "viral_within_30d"

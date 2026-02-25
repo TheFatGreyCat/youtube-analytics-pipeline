@@ -39,12 +39,19 @@ class ChannelLabelCreator:
         self.avg_views_threshold = avg_views_threshold
         self.min_conditions = min_conditions
 
-    def create_labels(self, channel_df: pd.DataFrame) -> pd.DataFrame:
+    def create_labels(
+        self,
+        channel_df: pd.DataFrame,
+        cluster_ids: Optional[list] = None,
+    ) -> pd.DataFrame:
         """
         Tính derived metrics và gán nhãn viral.
 
         Args:
-            channel_df: int_channel_summary DataFrame
+            channel_df:  int_channel_summary DataFrame
+            cluster_ids: List cluster_id tương ứng mỗi row (nếu có) →
+                         tính ngưỡng within-cluster thay vì global.
+                         Khi cluster có < 5 kênh thì fallback về global threshold.
 
         Returns:
             DataFrame gốc + cột mới: efficiency_ratio, loyalty_ratio,
@@ -64,28 +71,75 @@ class ChannelLabelCreator:
         df["depth_ratio"] = total_comments / total_views
         df["avg_views_per_video"] = total_views / video_count
 
-        # ── Tính ngưỡng từ training data ───────────────────────────────────
-        eff_thresh = df["efficiency_ratio"].quantile(self.efficiency_threshold)
-        loy_thresh = df["loyalty_ratio"].quantile(self.loyalty_threshold)
-        avg_thresh = df["avg_views_per_video"].quantile(self.avg_views_threshold)
+        # ── Global thresholds (fallback) ────────────────────────────────────
+        global_eff = df["efficiency_ratio"].quantile(self.efficiency_threshold)
+        global_loy = df["loyalty_ratio"].quantile(self.loyalty_threshold)
+        global_avg = df["avg_views_per_video"].quantile(self.avg_views_threshold)
 
-        logger.info("Ngưỡng — efficiency: %.2f, loyalty: %.4f, avg_views: %.0f",
-                    eff_thresh, loy_thresh, avg_thresh)
+        if cluster_ids is not None:
+            # ── Within-cluster labeling ────────────────────────────────────
+            df["_cluster_id"] = list(cluster_ids)
+            df["is_viral_channel"] = 0
 
-        # ── Gán nhãn (2 / 3 điều kiện) ─────────────────────────────────────
-        cond_A = (df["efficiency_ratio"] > eff_thresh).astype(int)
-        cond_B = (df["loyalty_ratio"] > loy_thresh).astype(int)
-        cond_C = (df["avg_views_per_video"] > avg_thresh).astype(int)
+            MIN_CLUSTER_SIZE = 5  # cluster nhỏ hơn → fallback về global
+            cluster_thresholds: dict = {}
 
-        met_conditions = cond_A + cond_B + cond_C
-        df["is_viral_channel"] = (met_conditions >= self.min_conditions).astype(int)
+            for cid in df["_cluster_id"].unique():
+                mask = df["_cluster_id"] == cid
+                subset = df[mask]
+                n = mask.sum()
 
-        # ── Debug info ─────────────────────────────────────────────────────
-        self._thresholds = {
-            "efficiency_p75": eff_thresh,
-            "loyalty_median": loy_thresh,
-            "avg_views_p75": avg_thresh,
-        }
+                if n >= MIN_CLUSTER_SIZE:
+                    eff_t = subset["efficiency_ratio"].quantile(self.efficiency_threshold)
+                    loy_t = subset["loyalty_ratio"].quantile(self.loyalty_threshold)
+                    avg_t = subset["avg_views_per_video"].quantile(self.avg_views_threshold)
+                    source = "within-cluster"
+                else:
+                    # Cluster quá nhỏ → dùng global threshold
+                    eff_t, loy_t, avg_t = global_eff, global_loy, global_avg
+                    source = "global (cluster nhỏ)"
+
+                cluster_thresholds[cid] = {
+                    "efficiency": eff_t, "loyalty": loy_t,
+                    "avg_views": avg_t, "n": int(n), "source": source,
+                }
+                logger.info(
+                    "Cluster %d (%d kênh, %s) — eff=%.2f, loy=%.4f, avg=%.0f",
+                    cid, n, source, eff_t, loy_t, avg_t,
+                )
+
+                cond_A = (subset["efficiency_ratio"] > eff_t).astype(int)
+                cond_B = (subset["loyalty_ratio"] > loy_t).astype(int)
+                cond_C = (subset["avg_views_per_video"] > avg_t).astype(int)
+                met = cond_A + cond_B + cond_C
+                df.loc[mask, "is_viral_channel"] = (met >= self.min_conditions).astype(int)
+
+            df.drop(columns=["_cluster_id"], inplace=True)
+            self._thresholds = {
+                "mode": "within-cluster",
+                "per_cluster": cluster_thresholds,
+                "global_fallback": {
+                    "efficiency_p75": global_eff,
+                    "loyalty_median": global_loy,
+                    "avg_views_p75": global_avg,
+                },
+            }
+        else:
+            # ── Global labeling (original behavior) ────────────────────────
+            logger.info("Ngưỡng global — efficiency: %.2f, loyalty: %.4f, avg_views: %.0f",
+                        global_eff, global_loy, global_avg)
+            cond_A = (df["efficiency_ratio"] > global_eff).astype(int)
+            cond_B = (df["loyalty_ratio"] > global_loy).astype(int)
+            cond_C = (df["avg_views_per_video"] > global_avg).astype(int)
+            met_conditions = cond_A + cond_B + cond_C
+            df["is_viral_channel"] = (met_conditions >= self.min_conditions).astype(int)
+            self._thresholds = {
+                "mode": "global",
+                "efficiency_p75": global_eff,
+                "loyalty_median": global_loy,
+                "avg_views_p75": global_avg,
+            }
+
         self._report_distribution(df, "is_viral_channel")
         return df
 
@@ -94,7 +148,7 @@ class ChannelLabelCreator:
         counts = df[label_col].value_counts().sort_index()
         total = len(df)
         print(f"\n{'─'*50}")
-        print(f"📊 CHANNEL LABEL DISTRIBUTION")
+        print(f"CHANNEL LABEL DISTRIBUTION")
         print(f"{'─'*50}")
         for val, cnt in counts.items():
             bar = "█" * int(cnt / total * 40)
@@ -104,13 +158,13 @@ class ChannelLabelCreator:
 
         label1_pct = counts.get(1, 0) / total * 100
         if label1_pct < 20:
-            print(f"\n  ⚠️  Chỉ {label1_pct:.1f}% kênh được label VIRAL — quá mất cân bằng!")
+            print(f"\n  Warning: only {label1_pct:.1f}% kênh được label VIRAL — quá mất cân bằng!")
             print("  Đề xuất: giảm min_conditions=1 hoặc hạ threshold.")
         elif label1_pct > 80:
-            print(f"\n  ⚠️  {label1_pct:.1f}% kênh được label VIRAL — quá nhiều!")
+            print(f"\n  Warning: {label1_pct:.1f}% kênh được label VIRAL — quá nhiều!")
             print("  Đề xuất: tăng min_conditions=3 hoặc nâng threshold.")
         else:
-            print(f"\n  ✅ Label balance tốt ({label1_pct:.1f}% viral)")
+            print(f"\n  Label balance OK ({label1_pct:.1f}% viral)")
         print(f"{'─'*50}\n")
 
     def get_thresholds(self) -> dict:
@@ -221,7 +275,7 @@ class VideoLabelCreator:
         not_viral_count = total - viral_count
 
         print(f"\n{'─'*50}")
-        print(f"📊 VIDEO LABEL DISTRIBUTION")
+        print(f"VIDEO LABEL DISTRIBUTION")
         print(f"{'─'*50}")
         for label, count in [("NOT VIRAL", not_viral_count), ("VIRAL", viral_count)]:
             bar = "█" * int(count / total * 40)
@@ -230,17 +284,17 @@ class VideoLabelCreator:
             print(f"  {label:12s} (label={val}): {count:4d} video ({pct:.1f}%) {bar}")
 
         if "time_window_label" in df.columns:
-            print(f"\n  📅 Time Window Distribution:")
+            print(f"\n  Time Window Distribution:")
             for label, count in df["time_window_label"].value_counts().items():
                 pct = count / total * 100
                 print(f"     {label:20s}: {count:4d} ({pct:.1f}%)")
 
         viral_pct = viral_count / total * 100
         if viral_pct < 5:
-            print(f"\n  ⚠️  Chỉ {viral_pct:.1f}% video viral — rất mất cân bằng!")
+            print(f"\n  Warning: only {viral_pct:.1f}% video viral — rất mất cân bằng!")
             print("   Đề xuất: giảm relative_threshold xuống 1.0")
         else:
-            print(f"\n  ✅ Label balance chấp nhận được ({viral_pct:.1f}% viral)")
+            print(f"\n  Label balance acceptable nhận được ({viral_pct:.1f}% viral)")
         print(f"{'─'*50}\n")
 
     def visualize_distributions(
@@ -301,7 +355,7 @@ class VideoLabelCreator:
         plt.tight_layout()
         if save_path:
             plt.savefig(save_path, dpi=150, bbox_inches="tight")
-            print(f"💾 Plot đã lưu: {save_path}")
+            print(f"Plot saved: {save_path}")
         else:
             plt.show()
         plt.close()

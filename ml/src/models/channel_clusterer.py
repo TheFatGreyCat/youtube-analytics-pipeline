@@ -84,7 +84,7 @@ class ChannelClusterer:
                 silhouettes.append(0.0)
 
         print(f"\n{'─'*50}")
-        print(f"📊 ELBOW METHOD + SILHOUETTE SCORE")
+        print(f"ELBOW METHOD + SILHOUETTE SCORE")
         print(f"{'─'*50}")
         for i, k in enumerate(k_range):
             sil = silhouettes[i]
@@ -95,7 +95,7 @@ class ChannelClusterer:
         # Chọn k có silhouette cao nhất
         best_k_idx = int(np.argmax(silhouettes))
         best_k = list(k_range)[best_k_idx]
-        print(f"\n  ✅ Optimal k = {best_k} (silhouette = {silhouettes[best_k_idx]:.3f})")
+        print(f"\n    Optimal k = {best_k} (silhouette = {silhouettes[best_k_idx]:.3f})")
         print(f"{'─'*50}\n")
         return best_k
 
@@ -142,6 +142,13 @@ class ChannelClusterer:
     def _compute_cluster_stats(self, df: pd.DataFrame) -> None:
         # Bước 1: tính stats thô
         raw: dict[int, dict] = {}
+
+        # Tất cả numeric features cần lưu percentile
+        PERCENTILE_FEATURES = [
+            "f1_efficiency", "f2_loyalty", "f3_depth", "f4_consistency",
+            "f6_avg_views", "f7_engagement", "f9_sub_tier", "f11_recent_trend",
+        ]
+
         for cluster_id in range(self.n_clusters):
             mask = df["cluster_id"] == cluster_id
             subset = df[mask]
@@ -153,6 +160,17 @@ class ChannelClusterer:
             for feat in self.CLUSTER_FEATURES:
                 if feat in subset.columns:
                     stats[f"median_{feat}"] = float(subset[feat].median())
+
+            # Lưu per-feature percentiles để dùng lúc inference (within-cluster benchmark)
+            for feat in PERCENTILE_FEATURES:
+                if feat in subset.columns and len(subset) >= 3:
+                    vals = subset[feat].dropna()
+                    stats[f"p25_{feat}"]  = float(vals.quantile(0.25))
+                    stats[f"p50_{feat}"]  = float(vals.quantile(0.50))
+                    stats[f"p75_{feat}"]  = float(vals.quantile(0.75))
+                    stats[f"min_{feat}"]  = float(vals.min())
+                    stats[f"max_{feat}"]  = float(vals.max())
+
             raw[cluster_id] = stats
 
         # Bước 2: đặt tên động theo median f9_sub_tier (subscribers)
@@ -175,9 +193,21 @@ class ChannelClusterer:
 
         self._cluster_stats = raw
 
+    def update_stats_with_labels(self, labeled_df: pd.DataFrame) -> None:
+        """
+        Cập nhật viral rates + per-feature percentiles sau khi có within-cluster labels.
+        Gọi sau khi `fit()` và `create_labels(cluster_ids=...)` đã xong.
+
+        Args:
+            labeled_df: channel_features với cột cluster_id + is_viral_channel
+        """
+        if not self._is_fitted:
+            raise RuntimeError("Clusterer chưa fit.")
+        self._compute_cluster_stats(labeled_df)
+
     def _print_cluster_summary(self, df: pd.DataFrame) -> None:
         print(f"\n{'─'*60}")
-        print(f"📊 CHANNEL CLUSTERING SUMMARY (k={self.n_clusters})")
+        print(f"CHANNEL CLUSTERING SUMMARY (k={self.n_clusters})")
         print(f"{'─'*60}")
         for cid, stats in sorted(self._cluster_stats.items()):
             viral_rate_str = f"{stats['viral_rate']*100:.1f}%" if "viral_rate" in stats else "—"
@@ -215,7 +245,7 @@ class ChannelClusterer:
         save_path = path or CLUSTERER_PATH
         with open(save_path, "wb") as f:
             pickle.dump(self, f)
-        logger.info("✅ Clusterer đã lưu: %s", save_path)
+        logger.info("Clusterer saved: %s", save_path)
         return save_path
 
     @classmethod
@@ -223,7 +253,7 @@ class ChannelClusterer:
         load_path = path or CLUSTERER_PATH
         with open(load_path, "rb") as f:
             obj = pickle.load(f)
-        logger.info("✅ Clusterer đã tải: %s", load_path)
+        logger.info("Clusterer loaded: %s", load_path)
         return obj
 
     # ── Helpers ────────────────────────────────────────────────────────────────
@@ -248,3 +278,41 @@ class ChannelClusterer:
 
     def get_cluster_viral_rate(self, cluster_id: int) -> float:
         return self._cluster_stats.get(cluster_id, {}).get("viral_rate", 0.5)
+
+    def get_within_cluster_percentile(self, cluster_id: int, feature: str, value: float) -> float:
+        """
+        Tính percentile rank của value so với CÁC KÊNH CÙNG CLUSTER (0–100).
+
+        Ví dụ: MixiGaming avg_views=855K trong cluster "Established Channels"
+        sẽ so sánh với các kênh 1M–10M sub khác, không phải MrBeast.
+
+        Returns:
+            Percentile rank trong cluster (0=thấp nhất, 100=cao nhất cluster).
+            Trả về 50.0 nếu không có dữ liệu.
+        """
+        stats = self._cluster_stats.get(cluster_id, {})
+        p_min = stats.get(f"min_{feature}")
+        p25   = stats.get(f"p25_{feature}")
+        p50   = stats.get(f"p50_{feature}")
+        p75   = stats.get(f"p75_{feature}")
+        p_max = stats.get(f"max_{feature}")
+
+        if None in (p_min, p25, p50, p75, p_max):
+            return 50.0  # không có dữ liệu cluster → fallback
+
+        if value <= p_min:
+            return 0.0
+        if value >= p_max:
+            return 100.0
+
+        breakpoints = [
+            (p_min, 0.0), (p25, 25.0), (p50, 50.0), (p75, 75.0), (p_max, 100.0),
+        ]
+        for i in range(len(breakpoints) - 1):
+            lo_v, lo_p = breakpoints[i]
+            hi_v, hi_p = breakpoints[i + 1]
+            if lo_v <= value <= hi_v:
+                if hi_v == lo_v:
+                    return float(lo_p)
+                return lo_p + (value - lo_v) / (hi_v - lo_v) * (hi_p - lo_p)
+        return 50.0

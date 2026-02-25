@@ -22,14 +22,14 @@ def _fmt_number(n: int | float) -> str:
 
 def _viral_label(prob: float) -> str:
     if prob >= 0.85:
-        return "🔥 EXTREMELY HIGH"
+        return "EXTREMELY HIGH"
     if prob >= 0.70:
-        return "📈 HIGH"
+        return "HIGH"
     if prob >= 0.55:
-        return "⚡ MEDIUM"
+        return "MEDIUM"
     if prob >= 0.40:
-        return "⚠️ LOW"
-    return "❌ VERY LOW"
+        return "LOW"
+    return "VERY LOW"
 
 
 # ─── Channel Report ────────────────────────────────────────────────────────────
@@ -52,10 +52,11 @@ class ChannelReport:
 
     def to_dict(self) -> dict:
         upload_freq = "N/A"
-        trend_emoji = "📈 Tăng trưởng" if self.recent_trend > 1.05 else (
-            "📉 Giảm" if self.recent_trend < 0.95 else "➡️ Ổn định"
+        trend_emoji = "Tang truong" if self.recent_trend > 1.05 else (
+            "Giam" if self.recent_trend < 0.95 else "On dinh"
         )
-        p = int(self.percentile_vs_benchmark)
+        # Clip to [5, 95] so displayed rank never shows "top 0%" or "top 100%"
+        p = max(5, min(95, int(self.percentile_vs_benchmark)))
 
         return {
             "input": self.input_name,
@@ -78,7 +79,7 @@ class ChannelReport:
 
             "key_metrics": {
                 "avg_views_per_video": _fmt_number(self.avg_views_per_video),
-                "like_ratio": f"{self.like_ratio*100:.2f}% (top {max(1, 100-p)}% benchmark)",
+                "like_ratio": f"{self.like_ratio*100:.2f}% (top {max(1, 100-p)}% trong tier)",
                 "comment_ratio": f"{self.comment_ratio*100:.2f}%",
                 "upload_frequency": upload_freq,
             },
@@ -93,33 +94,36 @@ class ChannelReport:
 
     def print_report(self) -> None:
         d = self.to_dict()
-        print("\n" + "=" * 65)
-        print(f"📺 CHANNEL REPORT: {d['channel_name']}")
-        print("=" * 65)
-        print(f"  Channel ID   : {d['channel_id']}")
-        print(f"  Subscribers  : {_fmt_number(self.subscribers)}")
         vp = d["viral_potential"]
-        print(f"\n  🎯 VIRAL POTENTIAL")
-        print(f"  {'─'*30}")
-        print(f"  Probability  : {vp['probability']*100:.1f}%")
-        print(f"  Label        : {vp['label']}")
-        print(f"  Confidence   : {vp['confidence']}")
-        print(f"  Benchmark %  : top {max(1, 100-vp['percentile_vs_benchmark'])}%")
-        print(f"\n  🔗 CLUSTER: {d['cluster']['name']}")
         km = d["key_metrics"]
-        print(f"\n  📊 KEY METRICS")
-        print(f"  {'─'*30}")
-        print(f"  Avg views/video: {km['avg_views_per_video']}")
-        print(f"  Like ratio     : {km['like_ratio']}")
-        print(f"  Comment ratio  : {km['comment_ratio']}")
-        print(f"  Recent trend   : {d['recent_trend']}")
-        print(f"\n  💡 SUMMARY")
-        print(f"  {d['summary']}")
+        sep = "-" * 50
+        print()
+        print(sep)
+        print(f"CHANNEL REPORT: {d['channel_name']}")
+        print(sep)
+        print(f"  Channel ID      : {d['channel_id']}")
+        print(f"  Subscribers     : {_fmt_number(self.subscribers)}")
+        print(f"  Tier            : {d['cluster']['name']}")
+        print()
+        print("  VIRAL POTENTIAL")
+        print(f"  Probability     : {vp['probability']*100:.1f}%")
+        print(f"  Label           : {vp['label']}")
+        print(f"  Confidence      : {vp['confidence']}")
+        print(f"  Rank in tier    : top {max(1, 100-vp['percentile_vs_benchmark'])}%")
+        print()
+        print("  KEY METRICS")
+        print(f"  Avg views/video : {km['avg_views_per_video']}")
+        print(f"  Like ratio      : {km['like_ratio']}")
+        print(f"  Comment ratio   : {km['comment_ratio']}")
+        print(f"  Recent trend    : {d['recent_trend']}")
+        print()
+        print(f"  Summary: {d['summary']}")
         if d["risk_factors"]:
-            print(f"\n  ⚠️  RISKS")
+            print()
+            print("  Risks:")
             for r in d["risk_factors"]:
-                print(f"    • {r}")
-        print("=" * 65)
+                print(f"    - {r}")
+        print(sep)
 
     def to_json(self, indent: int = 2) -> str:
         return json.dumps(self.to_dict(), ensure_ascii=False, indent=indent)
@@ -197,43 +201,46 @@ class VideoReport:
 
     def print_report(self) -> None:
         d = self.to_dict()
-        print("\n" + "=" * 65)
-        print(f"🎬 VIDEO REPORT")
-        print("=" * 65)
-        print(f"  Title      : {self.video_title[:60]}")
-        print(f"  Channel    : {self.channel_name}")
-        print(f"  Published  : {self.published_at}")
-        print(f"  Age        : {self.video_age}")
         vp = d["viral_prediction"]
-        print(f"\n  🎯 VIRAL PREDICTION")
-        print(f"  {'─'*30}")
-        print(f"  Label      : {vp['label']}")
-        print(f"  Probability: {vp['probability']*100:.1f}%")
-        print(f"  Time Window: {vp['time_window']}")
-        print(f"  Confidence : {vp['confidence']}")
         cp = d["current_performance"]
-        print(f"\n  📊 CURRENT PERFORMANCE")
-        print(f"  {'─'*30}")
-        print(f"  Views      : {cp['views']}")
-        print(f"  Views/hour : {cp['views_per_hour']}")
-        print(f"  vs Avg     : {cp['vs_channel_avg']}")
-        print(f"  Percentile : top {100-self.channel_percentile}%")
         es = d["early_signals"]
-        print(f"\n  ⚡ EARLY SIGNALS: {'✅ có' if es['available'] else '❌ không có'}")
-        print(f"  Momentum   : {es['momentum_score']}/100")
         pv = d["projected_views"]
-        print(f"\n  📈 PROJECTED VIEWS")
-        print(f"  {'─'*30}")
-        print(f"  7 ngày     : {pv.get('7_days', 'N/A')}")
-        print(f"  30 ngày    : {pv.get('30_days', 'N/A')}")
-        print(f"  Confidence : {pv.get('confidence', 'N/A')}")
-        print(f"\n  💡 SUMMARY")
-        print(f"  {d['summary']}")
+        sep = "-" * 50
+        print()
+        print(sep)
+        print("VIDEO REPORT")
+        print(sep)
+        print(f"  Title       : {self.video_title[:60]}")
+        print(f"  Channel     : {self.channel_name}")
+        print(f"  Published   : {self.published_at}")
+        print(f"  Age         : {self.video_age}")
+        print()
+        print("  VIRAL PREDICTION")
+        print(f"  Label       : {vp['label']}")
+        print(f"  Probability : {vp['probability']*100:.1f}%")
+        print(f"  Time window : {vp['time_window']}")
+        print(f"  Confidence  : {vp['confidence']}")
+        print()
+        print("  CURRENT PERFORMANCE")
+        print(f"  Views       : {cp['views']}")
+        print(f"  Views/hour  : {cp['views_per_hour']}")
+        print(f"  vs Pace     : {cp['vs_channel_avg']}")
+        print(f"  Percentile  : top {100-self.channel_percentile}%")
+        print(f"  Early signals: {'yes' if es['available'] else 'no'}")
+        print(f"  Momentum    : {es['momentum_score']}/100")
+        print()
+        print("  PROJECTED VIEWS")
+        print(f"  7 days      : {pv.get('7_days', 'N/A')}")
+        print(f"  30 days     : {pv.get('30_days', 'N/A')}")
+        print(f"  Confidence  : {pv.get('confidence', 'N/A')}")
+        print()
+        print(f"  Summary: {d['summary']}")
         if d["warnings"]:
-            print(f"\n  ⚠️  WARNINGS")
+            print()
+            print("  Warnings:")
             for w in d["warnings"]:
-                print(f"    • {w}")
-        print("=" * 65)
+                print(f"    - {w}")
+        print(sep)
 
     def to_json(self, indent: int = 2) -> str:
         return json.dumps(self.to_dict(), ensure_ascii=False, indent=indent)

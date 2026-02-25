@@ -79,7 +79,7 @@ class _VideoViralB1:
         y = features_df["is_viral"].values.astype(int)
 
         print(f"\n{'─'*60}")
-        print(f"🤖 TRAINING MODEL B1 — VIDEO VIRAL CLASSIFIER")
+        print("TRAINING MODEL B1 - VIDEO VIRAL CLASSIFIER")
         print(f"{'─'*60}")
         print(f"  Videos     : {len(X)}")
         print(f"  Features   : {len(available)}")
@@ -93,9 +93,18 @@ class _VideoViralB1:
 
         # Pick algorithm based on class balance
         viral_rate = y.mean()
+        sample_weight = None
         if viral_rate < 0.1:
-            logger.warning("Rất mất cân bằng (%.1f%% viral) — dùng LogisticRegression", viral_rate * 100)
-            algo = LogisticRegression(class_weight="balanced", max_iter=500, random_state=42)
+            # Imbalanced: dùng GradientBoosting + sample_weight thay vì LR balanced.
+            # LR balanced inflate recall → ~97% recall nhưng precision rất thấp → false positive tràn.
+            # GradientBoosting nhạy cảm hơn với threshold và ít bias hơn.
+            logger.warning("Mất cân bằng (%.1f%% viral) — GradientBoosting + sample_weight", viral_rate * 100)
+            algo = GradientBoostingClassifier(
+                n_estimators=200, max_depth=4, learning_rate=0.05,
+                subsample=0.8, min_samples_leaf=5, random_state=42,
+            )
+            sample_weight = compute_class_weight("balanced", classes=np.unique(y), y=y)
+            sample_weight = sample_weight[y]  # per-sample weight
         elif len(X) >= 200:
             algo = GradientBoostingClassifier(
                 n_estimators=100, max_depth=3, learning_rate=0.1,
@@ -112,6 +121,8 @@ class _VideoViralB1:
         ])
 
         # Stratified K-Fold CV
+        # Note: sample_weight chỉ dùng cho final fit — CV dùng unweighted để tránh
+        # incompatibility với các phiên bản sklearn cũ hơn.
         n_splits = min(5, max(2, int(y.sum() // 5) if y.sum() >= 10 else 2))
         try:
             cv = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=42)
@@ -123,15 +134,18 @@ class _VideoViralB1:
             y_pred = self._model.predict(X)
             cv_f1 = f1_score(y, y_pred, zero_division=0)
 
-        # Final fit trên toàn bộ data
-        self._model.fit(X, y)
+        # Final fit trên toàn bộ data (có sample_weight nếu imbalanced)
+        if sample_weight is not None:
+            self._model.fit(X, y, model__sample_weight=sample_weight)
+        else:
+            self._model.fit(X, y)
         self._is_fitted = True
 
         print(f"\n  {'─'*40}")
         print(classification_report(y, y_pred, target_names=["Not Viral", "Viral"],
                                     zero_division=0))
         print(f"  CV F1-Score : {cv_f1:.3f}")
-        print(f"  vs Baseline : {'✅ BEAT' if cv_f1 > baseline_f1 else '❌ DID NOT BEAT'} "
+        print(f"  vs Baseline : {'BEAT' if cv_f1 > baseline_f1 else 'DID NOT BEAT'} "
               f"baseline ({baseline_f1:.3f})")
 
         return {"cv_f1": cv_f1, "baseline_f1": baseline_f1, "beat_baseline": cv_f1 > baseline_f1}
@@ -200,7 +214,7 @@ class _VideoTimeWindowB2:
         self._n_classes = len(self._le.classes_)
 
         print(f"\n{'─'*60}")
-        print(f"🤖 TRAINING MODEL B2 — TIME WINDOW CLASSIFIER")
+        print("TRAINING MODEL B2 - TIME WINDOW CLASSIFIER")
         print(f"{'─'*60}")
         print(f"  Videos  : {len(X)}")
         print(f"  Classes : {list(self._le.classes_)}")
@@ -305,7 +319,7 @@ class VideoViralClassifier:
         self._is_fitted = True
 
         print(f"\n{'='*60}")
-        print(f"📊 MODEL B TRAINING COMPLETE")
+        print("MODEL B TRAINING COMPLETE")
         print(f"{'='*60}")
         print(f"  B1 (viral binary) F1   : {b1_results['cv_f1']:.3f}")
         print(f"  B2 (time window) F1    : {b2_results['cv_f1_weighted']:.3f}")
@@ -362,13 +376,13 @@ class VideoViralClassifier:
     def _make_label(will_viral: bool, prob: float, time_window: str) -> str:
         if not will_viral:
             if prob > 0.4:
-                return "⚠️ KHẢ NĂNG VIRAL THẤP"
-            return "❌ KHÔNG CÓ DẤU HIỆU VIRAL"
+                return "LOW VIRAL POTENTIAL"
+            return "NOT VIRAL"
         if time_window == "viral_within_7d":
-            return "⚡ VIRAL TRONG TUẦN"
+            return "VIRAL WITHIN 7 DAYS"
         if time_window in ("viral_within_30d", "viral"):
-            return "🔥 VIRAL TRONG THÁNG"
-        return "📈 CÓ TIỀM NĂNG VIRAL"
+            return "VIRAL WITHIN 30 DAYS"
+        return "VIRAL POTENTIAL"
 
     @staticmethod
     def _calc_confidence(features: pd.DataFrame, prob: float) -> str:
@@ -404,8 +418,8 @@ class VideoViralClassifier:
             pickle.dump(self._b1, f)
         with open(p2, "wb") as f:
             pickle.dump(self._b2, f)
-        logger.info("✅ Model B1 đã lưu: %s", p1)
-        logger.info("✅ Model B2 đã lưu: %s", p2)
+        logger.info("Model B1 saved: %s", p1)
+        logger.info("Model B2 saved: %s", p2)
         return p1, p2
 
     @classmethod
@@ -422,7 +436,7 @@ class VideoViralClassifier:
         with open(p2, "rb") as f:
             obj._b2 = pickle.load(f)
         obj._is_fitted = True
-        logger.info("✅ Model B loaded")
+        logger.info("Model B loaded")
         return obj
 
     def _check_fitted(self) -> None:
