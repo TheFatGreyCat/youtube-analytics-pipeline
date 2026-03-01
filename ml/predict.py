@@ -5,7 +5,7 @@ Loads the trained XGBoost model, prepares raw YouTube API data into
 the exact feature matrix used during training, runs inference, and
 returns a structured result with SHAP-based explanations.
 
-Pipeline order:
+Pipeline order:1
     train.py / save_load.py  →  predict.py
 
 Usage (standalone):

@@ -7,7 +7,7 @@ Fetches data from the three Intermediate-layer tables in BigQuery:
   - int_channel_summary       : aggregated channel-level statistics
 
 Usage (standalone):
-    python -m ml.data_loader
+    python -m ml.data_loader1
 """
 
 from __future__ import annotations

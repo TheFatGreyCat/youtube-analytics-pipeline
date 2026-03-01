@@ -3,7 +3,7 @@ Interactive terminal test for the YouTube Viral Video Prediction pipeline.
 
 Nhap ten kenh YouTube → tim kenh → lay video moi nhat → du doan viral → hien thi ket qua.
 
-Cach chay:
+Cach chay:1
     python test_predict.py
     python test_predict.py --verbose    <- hien thi INFO logs
 """

@@ -1,5 +1,5 @@
 """
-Configuration for the ML module.
+Configuration for the ML module.1
 Reads environment variables from .env file at the project root.
 """
 import os

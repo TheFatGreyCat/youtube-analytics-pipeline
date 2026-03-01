@@ -4,7 +4,7 @@ Model persistence for the YouTube viral prediction pipeline.
 Saves and loads the XGBoost model (JSON format) and its associated
 training configuration (YAML) to / from the models/ directory.
 
-Pipeline order:
+Pipeline order:1
     ml/train.py  → save_model()  →  models/xgb_viral_{v}.json
                                     models/feature_config_{v}.yaml
     ml/predict.py → load_model() ←  same files
