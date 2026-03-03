@@ -12,20 +12,24 @@ import os
 st.set_page_config(page_title="YouTube Analytics Dashboard", layout="wide")
 
 # YouTube API setup
-API_KEY = "AIzaSyC0gDJ5ipTodDrMGHF2-Zg0qMftp_2UY6E"
-youtube = build("youtube", "v3", developerKey=API_KEY)
+GCP_PROJECT_ID = os.getenv('GCP_PROJECT_ID')
+BQ_DATASET_ID = os.getenv('BQ_DATASET_ID', 'raw_yt')
+YOUTUBE_API_KEY = os.getenv('YOUTUBE_API_KEY')
+CREDENTIALS_PATH = os.getenv('GOOGLE_APPLICATION_CREDENTIALS')
+youtube = build("youtube", "v3", developerKey=YOUTUBE_API_KEY)
 
 # ================== TITLE ==================
 st.title("📊 YouTube Analytics Dashboard")
 st.caption("Phân tích chi tiết dữ liệu YouTube")
 
 # ================== CHANNEL FROM SEARCH ==================
-if "selected_channel_id" not in st.session_state:
-    st.warning("🔎 Hãy tìm và chọn một kênh trước.")
-    st.stop()
-
-channel_id = st.session_state.selected_channel_id
+channel_id = st.session_state.get("selected_channel_id")
 channel_name = st.session_state.get("selected_channel_name", "Unknown")
+
+if not channel_id:
+    st.warning("🔎 Hãy tìm và chọn một kênh trước.")
+    st.switch_page("pages/1_Channel_Search.py")
+    st.stop()
 
 st.success(f"🎯 Đang phân tích kênh: {channel_name}")
 st.write(f"Channel ID: {channel_id}")
@@ -38,15 +42,10 @@ with col_refresh:
 
 # ================== BIGQUERY CLIENT ==================
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-credentials_path = os.path.join(
-    BASE_DIR,
-    "credentials",
-    "project-8fd99edc-9e20-4b82-b43-41fc5f2ccbcd.json"
-)
 
 client = bigquery.Client.from_service_account_json(
-    credentials_path,
-    project="project-8fd99edc-9e20-4b82-b43"
+    CREDENTIALS_PATH,
+    GCP_PROJECT_ID
 )
 
 # ================== HELPER FUNCTIONS ==================
@@ -306,7 +305,7 @@ if not videos_df.empty:
     # Video với engagement cao nhất
     if not videos_df.empty:
         best_video = videos_df.loc[videos_df['engagement_rate'].idxmax()]
-        col_m4.metric("Video tốt nhất", best_video['title'][:30] + "...")
+        col_m4.metric("Video tốt nhất", str(best_video['title'])[:30] + "...")
         col_m4.write("Dựa trên engagement rate cao nhất")
 
 # ================== FOOTER ==================
