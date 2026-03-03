@@ -4,9 +4,9 @@
         partition_by={
             'field': 'published_date',
             'data_type': 'date',
-            'granularity': 'day'
+            'granularity': 'month'
         },
-        cluster_by=['channel_id', 'category_id']
+        cluster_by=['channel_id', 'video_id']
     )
 }}
 

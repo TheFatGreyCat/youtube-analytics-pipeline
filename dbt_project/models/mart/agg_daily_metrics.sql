@@ -4,34 +4,43 @@
         partition_by={
             'field': 'metric_date',
             'data_type': 'date',
-            'granularity': 'day'
+            'granularity': 'month'
         },
-        cluster_by=['channel_id']
+        cluster_by=['channel_id', 'metric_date']
     )
 }}
 
 with videos as (
-    select * from {{ ref('int_engagement_metrics') }}
+    select * from {{ ref('int_videos__enhanced') }}
+),
+
+engagement as (
+    select
+        video_id,
+        engagement_score,
+        like_rate_pct
+    from {{ ref('int_engagement_metrics') }}
 ),
 
 daily_agg as (
     select
-        date(published_at) as metric_date,
-        channel_id,
-        any_value(channel_name) as channel_name,
-        any_value(country_code) as country_code,
-        
-        count(distinct video_id) as videos_published,
-        sum(view_count) as total_views,
-        sum(like_count) as total_likes,
-        sum(comment_count) as total_comments,
-        avg(engagement_score) as avg_engagement_score,
-        avg(like_rate_pct) as avg_like_rate_pct,
-        max(view_count) as max_video_views,
-        
+        date(v.published_at) as metric_date,
+        v.channel_id,
+        any_value(v.channel_name)  as channel_name,
+        any_value(v.country_code)  as country_code,
+
+        count(distinct v.video_id) as videos_published,
+        sum(v.view_count)          as total_views,
+        sum(v.like_count)          as total_likes,
+        sum(v.comment_count)       as total_comments,
+        avg(e.engagement_score)    as avg_engagement_score,
+        avg(e.like_rate_pct)       as avg_like_rate_pct,
+        max(v.view_count)          as max_video_views,
+
         current_timestamp() as dbt_updated_at
-        
-    from videos
+
+    from videos v
+    left join engagement e on v.video_id = e.video_id
     group by 1, 2
 ),
 

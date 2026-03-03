@@ -8,6 +8,12 @@ with source as (
     select * from {{ source('youtube_raw', 'raw_videos') }}
 ),
 
+valid_channel_ids as (
+    select id as channel_id
+    from {{ source('youtube_raw', 'raw_channels') }}
+    where ARRAY_LENGTH(JSON_QUERY_ARRAY(raw, '$.items')) > 0
+),
+
 flattened as (
     select
         -- Primary Key
@@ -45,6 +51,9 @@ flattened as (
 
     from source
     where COALESCE(JSON_VALUE(raw, '$.status.privacyStatus'), 'public') = 'public'
+        and JSON_VALUE(raw, '$.contentDetails.duration') is not null
 )
 
-select * from flattened
+select f.*
+from flattened f
+inner join valid_channel_ids vc on f.channel_id = vc.channel_id

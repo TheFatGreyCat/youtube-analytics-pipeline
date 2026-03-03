@@ -25,31 +25,32 @@ metrics as (
         country_code,
         
         case 
-            when view_count > 0 then safe_divide(like_count, view_count) * 100 
+            when view_count > 0 then least(like_count / view_count * 100, 100.0)
             else 0 
         end as like_rate_pct,
         
         case 
-            when view_count > 0 then safe_divide(comment_count, view_count) * 100 
+            when view_count > 0 then least(comment_count / view_count * 100, 100.0)
             else 0 
         end as comment_rate_pct,
         
         case 
-            when view_count > 0 then safe_divide((like_count + comment_count * 2), view_count) * 100 
+            when view_count > 0 then (like_count + comment_count * 2) / view_count * 100 
             else 0 
         end as engagement_score,
         
-        safe_divide(view_count, nullif(days_since_published, 0)) as avg_views_per_day,
+        view_count / nullif(days_since_published, 0) as avg_views_per_day,
         
         case
-            when safe_divide(like_count, view_count) >= 0.05 then 'high'
-            when safe_divide(like_count, view_count) >= 0.02 then 'medium'
+            when view_count = 0 then 'low'
+            when like_count / view_count >= 0.05 then 'high'
+            when like_count / view_count >= 0.02 then 'medium'
             else 'low'
         end as engagement_level,
         
         case
-            when safe_divide(view_count, nullif(days_since_published, 0)) > 
-                 safe_divide(channel_subscribers * 0.1, 1) then true
+            when view_count / nullif(days_since_published, 0) > 
+                 channel_subscribers * 0.1 then true
             else false
         end as is_potentially_viral
         

@@ -33,6 +33,7 @@ flattened as (
         {{ get_passthrough_columns('youtube__channel_passthrough_columns') }}
         
     from source
+    where ARRAY_LENGTH(JSON_QUERY_ARRAY(raw, '$.items')) > 0
 )
 
 select * from flattened
