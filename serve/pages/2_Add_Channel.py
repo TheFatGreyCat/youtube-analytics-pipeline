@@ -1,172 +1,73 @@
 import streamlit as st
 from googleapiclient.discovery import build
-from google.cloud import bigquery
 import pandas as pd
 import os
-import csv
+from dotenv import load_dotenv
 
-# ================= CONFIG =================
-API_KEY = "AIzaSyC0gDJ5ipTodDrMGHF2-Zg0qMftp_2UY6E"
-youtube = build("youtube", "v3", developerKey=API_KEY)
+# ================= CẤU HÌNH =================
+# Nạp biến môi trường từ thư mục gốc của dự án
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+load_dotenv(os.path.join(BASE_DIR, '.env'))
+
+# Đường dẫn file CSV
+CSV_PATH = os.path.join(BASE_DIR, 'config', 'channels.csv')
+TEMPLATE_CSV_PATH = os.path.join(BASE_DIR, 'config', 'channels_template.csv')
+
+API_KEY = os.getenv('YOUTUBE_API_KEY') or ""
+if not API_KEY:
+    st.error("🔑 YOUTUBE_API_KEY chưa được thiết lập. Thêm vào .env hoặc biến môi trường và khởi động lại.")
+    st.stop()
+
+# Khởi tạo YouTube client (tránh vô tình dùng ADC)
+try:
+    youtube = build("youtube", "v3", developerKey=API_KEY)
+except Exception as err:
+    st.error(
+        "❌ Không thể khởi tạo YouTube client. Xác nhận YOUTUBE_API_KEY hợp lệ."
+        f" Chi tiết: {err}"
+    )
+    st.stop()
 
 st.set_page_config(page_title="Add Channel", layout="wide")
 
 st.title("➕ Thêm kênh mới")
 st.caption("Thêm kênh mới vào hệ thống để phân tích")
 
-# Check BigQuery availability
-st.markdown("---")
-with st.expander("ℹ️ Hướng dẫn sử dụng", expanded=False):
-    st.info("""
-    **Cách sử dụng:**
-    1. **Kiểm tra kênh** - Section 0: Kiểm tra xem kênh đã có trong danh sách chưa
-    2. **Tìm kiếm** - Section 1: Tìm kiếm kênh theo tên rồi thêm
-    3. **Thêm bằng ID** - Section 2: Nhập Channel ID (bắt đầu UC) để thêm trực tiếp
-    4. **Xem danh sách** - Section 3: Xem tất cả kênh đã thêm
-    
-    **Lưu ý:** Kênh được lưu vào file CSV (config/channels.csv) để lưu trữ offline.
-    """)
+# ================= CÁC HÀM =================
 
-st.markdown("---")
-
-# ================= BIGQUERY CLIENT =================
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-credentials_path = os.path.join(
-    BASE_DIR,
-    "credentials",
-    "project-8fd99edc-9e20-4b82-b43-41fc5f2ccbcd.json"
-)
-
-# Check BigQuery availability
-BIGQUERY_AVAILABLE = False
-client = None
-try:
-    client = bigquery.Client.from_service_account_json(
-        credentials_path,
-        project="project-8fd99edc-9e20-4b82-b43"
-    )
-    # Test connection
-    client.list_tables("raw")
-    BIGQUERY_AVAILABLE = True
-except Exception as bq_init_error:
-    st.warning(f"⚠️ BigQuery không khả dụng: {str(bq_init_error)[:80]}")
-    st.info("💡 App sẽ sử dụng CSV để lưu danh sách kênh")
-
-# ================= CSV FILE PATH =================
-CSV_FILE_PATH = os.path.join(BASE_DIR, "config", "channels.csv")
-
-# ================= CSV FUNCTIONS =================
-
-def load_channels_from_csv():
-    """Load channels dari file CSV.
-
-    If the CSV does not exist (or is empty) we attempt to bootstrap it from
-    the `channels_template.csv` file located in the same config directory.
-    The template contains only `num_id` and `channel_name`; remaining
-    columns are filled with defaults so downstream code can rely on a
-    consistent schema.  The initial copy is persisted to `channels.csv`
-    so users can modify or extend it later.
-    """
-    def _make_empty():
-        return pd.DataFrame(
-            columns=['num_id', 'channel_name', 'channel_id',
-                     'subscriber_count', 'total_views', 'total_videos']
-        )
-
-    if os.path.exists(CSV_FILE_PATH):
-        try:
-            df = pd.read_csv(CSV_FILE_PATH)
-            return df
-        except Exception as e:
-            st.error(f"❌ Lỗi đọc file CSV: {str(e)}")
-            return _make_empty()
-
-    # CSV does not exist yet; bootstrap from template if available
-    template_path = os.path.join(BASE_DIR, "config", "channels_template.csv")
-    if os.path.exists(template_path):
-        try:
-            templ = pd.read_csv(template_path)
-            # ensure required columns
-            for col in ['channel_id', 'subscriber_count', 'total_views', 'total_videos']:
-                if col not in templ.columns:
-                    templ[col] = 0 if col != 'channel_id' else ''
-            templ = templ[['num_id', 'channel_name', 'channel_id',
-                           'subscriber_count', 'total_views', 'total_videos']]
-
-            os.makedirs(os.path.dirname(CSV_FILE_PATH), exist_ok=True)
-            templ.to_csv(CSV_FILE_PATH, index=False)
-            return templ
-        except Exception as e:
-            st.error(f"❌ Lỗi đọc file template: {str(e)}")
-            return _make_empty()
-
-    # no CSV and no template
-    return _make_empty()
-
-def check_channel_in_csv(channel_name, channel_id=None):
-    """Check xem channel đã có trong file CSV chưa"""
-    df = load_channels_from_csv()
-    if df.empty:
-        return False, None
-    
-    if channel_id:
-        result = df[df['channel_id'].astype(str).str.strip() == channel_id.strip()]
-    else:
-        result = df[df['channel_name'].str.lower() == channel_name.lower()]
-    
-    if not result.empty:
-        return True, result.iloc[0]
-    return False, None
-
-def add_channel_to_csv(channel_info):
-    """Add channel vào file CSV
-
-    Before appending, check whether the channel already exists in the CSV.
-    If it does, warn and return False so callers know nothing was added.
-    This makes the CSV the canonical source-of-truth for channel list.
-    """
-    # first check duplicates by id or name
-    exists, existing = check_channel_in_csv(
-        channel_info.get('channel_name', ''),
-        channel_info.get('channel_id', None)
-    )
-    if exists:
-        st.warning(f"⚠️ Kênh '{channel_info.get('channel_name')}' đã tồn tại trong CSV.")
-        return False
-
+def safe_int(value, default=0):
     try:
-        df = load_channels_from_csv()
-        
-        # Get next num_id
-        if df.empty:
-            next_id = 1
-        else:
-            next_id = int(df['num_id'].max()) + 1
-        
-        # Create new row
-        new_row = {
-            'num_id': next_id,
-            'channel_name': channel_info['channel_name'],
-            'channel_id': channel_info['channel_id'],
-            'subscriber_count': channel_info['subscriber_count'],
-            'total_views': channel_info['total_views'],
-            'total_videos': channel_info['total_videos']
-        }
-        
-        # Append to dataframe
-        new_df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
-        
-        # Ensure directory exists
-        os.makedirs(os.path.dirname(CSV_FILE_PATH), exist_ok=True)
-        
-        # Save to CSV
-        new_df.to_csv(CSV_FILE_PATH, index=False)
-        return True
-    except Exception as e:
-        st.error(f"❌ Lỗi lưu vào file CSV: {str(e)}")
-        return False
+        if value is None or value == "":
+            return default
+        return int(value)
+    except (TypeError, ValueError):
+        return default
 
-# ================= FUNCTIONS =================
+def load_channels_csv():
+    """Load danh sách channels từ CSV"""
+    if os.path.exists(CSV_PATH):
+        try:
+            df = pd.read_csv(CSV_PATH)
+        except Exception:
+            df = pd.DataFrame()
+        required_cols = ['num_id', 'channel_name', 'channel_id', 'subscriber_count', 'total_views', 'total_videos']
+        for col in required_cols:
+            if col not in df.columns:
+                df[col] = '' if col in ['channel_name', 'channel_id'] else 0
+        return df[required_cols]
+    elif os.path.exists(TEMPLATE_CSV_PATH):
+        # Khởi tạo từ template nếu channels.csv chưa tồn tại
+        df = pd.read_csv(TEMPLATE_CSV_PATH)
+        df.to_csv(CSV_PATH, index=False)
+        return df
+    else:
+        # Tạo DataFrame rỗng với đúng các cột
+        return pd.DataFrame(columns=['num_id', 'channel_name', 'channel_id', 'subscriber_count', 'total_views', 'total_videos'])
+
+def save_channels_csv(df):
+    """Lưu danh sách channels vào CSV"""
+    df.to_csv(CSV_PATH, index=False)
+    st.success(f"✅ Đã lưu vào {CSV_PATH}")
 
 def get_channel_by_channel_id(channel_id):
     """Lấy thông tin kênh bằng Channel ID"""
@@ -187,9 +88,9 @@ def get_channel_by_channel_id(channel_id):
                 "channel_name": snippet.get("title", ""),
                 "description": snippet.get("description", ""),
                 "thumbnail": snippet.get("thumbnails", {}).get("high", {}).get("url", ""),
-                "subscriber_count": int(stats.get("subscriberCount", 0)),
-                "total_views": int(stats.get("viewCount", 0)),
-                "total_videos": int(stats.get("videoCount", 0))
+                "subscriber_count": int(stats.get("subscriberCount", 0)) if stats.get("subscriberCount") else 0,
+                "total_views": int(stats.get("viewCount", 0)) if stats.get("viewCount") else 0,
+                "total_videos": int(stats.get("videoCount", 0)) if stats.get("videoCount") else 0
             }
     except Exception as e:
         st.error(f"❌ Lỗi: {str(e)}")
@@ -215,226 +116,204 @@ def search_channels_by_name(keyword):
         
         return channels
     except Exception as e:
-        st.error(f"❌ Lỗi tìm kiếm: {str(e)}")
+        error_msg = str(e)
+        if "quota" in error_msg.lower():
+            st.error("❌ Đã vượt quá giới hạn API hôm nay. Vui lòng thử lại vào ngày mai hoặc cập nhật quota.")
+        else:
+            st.error(f"❌ Lỗi tìm kiếm: {error_msg}")
         return []
 
-def save_channel_to_bigquery(channel_info):
-    """Lưu thông tin kênh vào BigQuery và CSV
-
-    The CSV is always authoritative.  Before doing any inserts we verify the
-    channel isn't already present in the CSV file; if it is we warn and bail
-    out.  BigQuery is then checked separately but only when it's available.
-    """
-    # CSV duplicate check
-    exists, _ = check_channel_in_csv(channel_info.get('channel_name', ''),
-                                      channel_info.get('channel_id', None))
-    if exists:
-        st.warning(f"⚠️ Kênh '{channel_info.get('channel_name')}' đã tồn tại trong CSV. Không thêm nữa.")
-        return False
-
+def add_or_update_channel_csv(channel_info):
+    """Thêm hoặc cập nhật kênh trong CSV"""
     try:
-        # Try to check if channel exists in BigQuery (if available)
-        if BIGQUERY_AVAILABLE:
-            try:
-                query = f"""
-                SELECT COUNT(*) as count FROM `project-8fd99edc-9e20-4b82-b43.raw.raw_channels`
-                WHERE channel_id = '{channel_info["channel_id"]}'
-                """
-                result = client.query(query).to_dataframe()
-                
-                if result['count'].values[0] > 0:
-                    st.warning(f"⚠️ Kênh '{channel_info['channel_name']}' đã tồn tại trong hệ thống!")
-                    return False
-            except Exception as bq_check_error:
-                st.warning(f"⚠️ Không thể kiểm tra BigQuery: {str(bq_check_error)[:60]}")
+        # Nạp danh sách kênh hiện tại
+        channels_df = load_channels_csv()
         
-        # Try to insert to BigQuery if available
-        if BIGQUERY_AVAILABLE:
-            try:
-                from datetime import datetime
-                insert_query = f"""
-                INSERT INTO `project-8fd99edc-9e20-4b82-b43.raw.raw_channels`
-                (channel_id, channel_name, description, subscriber_count, total_views, total_videos, thumbnail_url, extracted_at)
-                VALUES (
-                    '{channel_info["channel_id"]}',
-                    '{channel_info["channel_name"].replace("'", "")}',
-                    '{channel_info["description"].replace("'", "")}',
-                    {channel_info["subscriber_count"]},
-                    {channel_info["total_views"]},
-                    {channel_info["total_videos"]},
-                    '{channel_info["thumbnail"]}',
-                    CURRENT_TIMESTAMP()
-                )
-                """
-                
-                client.query(insert_query).result()
-                st.success("✅ Đã lưu vào BigQuery")
-            except Exception as bq_insert_error:
-                st.warning(f"⚠️ Lưu vào BigQuery thất bại: {str(bq_insert_error)[:60]}")
+        channel_id = channel_info["channel_id"]
+        
+        # Kiểm tra kênh đã tồn tại hay chưa
+        existing = channels_df[channels_df['channel_id'] == channel_id]
+        
+        if not existing.empty:
+            # Cập nhật kênh đã có
+            idx = existing.index[0]
+            channels_df.at[idx, 'channel_name'] = channel_info["channel_name"]
+            channels_df.at[idx, 'subscriber_count'] = channel_info["subscriber_count"]
+            channels_df.at[idx, 'total_views'] = channel_info["total_views"]
+            channels_df.at[idx, 'total_videos'] = channel_info["total_videos"]
+            
+            save_channels_csv(channels_df)
+            return True
         else:
-            st.info("ℹ️ Sẽ lưu vào CSV (BigQuery không khả dụng)")
-        
-        # Save to CSV (always do this)
-        add_channel_to_csv(channel_info)
-        st.success("✅ Đã lưu vào CSV")
-        
-        return True
+            # Thêm kênh mới
+            current_max_id = pd.to_numeric(channels_df.get('num_id', pd.Series(dtype='int64')), errors='coerce').max()
+            new_id = int(current_max_id) + 1 if pd.notna(current_max_id) else 1
+            new_row = pd.DataFrame([{
+                'num_id': new_id,
+                'channel_name': channel_info["channel_name"],
+                'channel_id': channel_id,
+                'subscriber_count': channel_info["subscriber_count"],
+                'total_views': channel_info["total_views"],
+                'total_videos': channel_info["total_videos"]
+            }])
+            
+            channels_df = pd.concat([channels_df, new_row], ignore_index=True)
+            save_channels_csv(channels_df)
+            return True
+            
     except Exception as e:
         st.error(f"❌ Lỗi lưu dữ liệu: {str(e)}")
         return False
 
-# ================= UI SECTION 0: CHECK CHANNEL IN CSV =================
-st.subheader("📂 Kiểm tra kênh trong file danh sách")
-col_check = st.columns(1)[0]
-check_channel_id = col_check.text_input("Nhập Channel ID hoặc tên kênh để kiểm tra")
+# ================= KHỞI TẠO SESSION STATE =================
+if 'search_results' not in st.session_state:
+    st.session_state.search_results = []
+if 'last_search_keyword' not in st.session_state:
+    st.session_state.last_search_keyword = ""
+if 'channel_added' not in st.session_state:
+    st.session_state.channel_added = False
 
-if st.button("🔍 Kiểm tra"):
-    if check_channel_id.strip():
-        exists, channel_data = check_channel_in_csv(check_channel_id, check_channel_id)
+# ================= PHẦN GIAO DIỆN 1: TÌM THEO TÊN =================
+
+st.subheader("🔍 Nhập tên kênh bạn muốn thêm vào danh sách")
+
+# Form tìm kiếm
+with st.form("search_form"):
+    search_keyword = st.text_input("Nhập tên kênh", value=st.session_state.last_search_keyword)
+    col1, col2 = st.columns([2, 1])
+    
+    with col1:
+        search_submitted = st.form_submit_button("🔎 Tìm kiếm", use_container_width=True)
+
+if search_submitted and search_keyword.strip():
+    st.session_state.last_search_keyword = search_keyword
+    with st.spinner("Đang tìm kiếm trên YouTube..."):
+        channels = search_channels_by_name(search_keyword)
+        st.session_state.search_results = channels
         
-        if exists:
-            st.success("✅ Kênh đã có trong danh sách!")
-            col1, col2 = st.columns([1, 2])
-            with col1:
-                st.write("**Thông tin có trong file:**")
-            with col2:
-                st.write(f"**Tên:** {channel_data['channel_name']}")
-                st.write(f"**Channel ID:** {channel_data['channel_id']}")
-                st.write(f"**Subscribers:** {channel_data['subscriber_count']:,}")
-                st.write(f"**Total Views:** {channel_data['total_views']:,}")
-                st.write(f"**Total Videos:** {channel_data['total_videos']:,}")
+        if channels:
+            st.success(f"✅ Tìm thấy {len(channels)} kênh!")
         else:
-            st.info("📝 Kênh chưa có trong danh sách. Bạn có thể thêm nó bằng các phương thức dưới đây.")
-    else:
-        st.warning("Hãy nhập Channel ID hoặc tên kênh!")
+            st.warning("❌ Không tìm thấy kênh nào! Hãy thử từ khóa khác.")
 
-# ================= UI SECTION 1: SEARCH BY NAME =================
-st.subheader("🔍 Tìm kiếm theo tên kênh")
-col_search = st.columns(1)[0]
-search_keyword = col_search.text_input("Nhập tên kênh hoặc từ khóa tìm kiếm")
-
-if st.button("🔎 Tìm kiếm"):
-    if search_keyword.strip():
-        with st.spinner("Đang tìm kiếm..."):
-            channels = search_channels_by_name(search_keyword)
-            
-            if channels:
-                st.success(f"✅ Tìm thấy {len(channels)} kênh!")
-                
-                for i, channel in enumerate(channels, 1):
-                    with st.expander(f"{i}. {channel['channel_name']}"):
-                        col1, col2 = st.columns([1, 3])
-                        
-                        with col1:
-                            if channel['thumbnail']:
-                                st.image(channel['thumbnail'], width=150)
-                        
-                        with col2:
-                            st.write(f"**Channel ID:** {channel['channel_id']}")
-                            st.write(f"**Subscribers:** {channel['subscriber_count']:,}")
-                            st.write(f"**Total Views:** {channel['total_views']:,}")
-                            st.write(f"**Total Videos:** {channel['total_videos']:,}")
-                            st.write(f"**Description:** {channel['description'][:200]}...")
-                            
-                            if st.button(f"✅ Thêm kênh này", key=f"add_{i}"):
-                                if save_channel_to_bigquery(channel):
-                                    st.success(f"✅ Đã thêm kênh '{channel['channel_name']}' vào hệ thống!")
-                                    st.session_state.selected_channel_id = channel['channel_id']
-                                    st.session_state.selected_channel_name = channel['channel_name']
-                                    st.rerun()
-                                else:
-                                    st.info("ℹ️ Kênh đã tồn tại hoặc không thể lưu vào hệ thống.")
-            else:
-                st.warning("❌ Không tìm thấy kênh nào!")
-    else:
-        st.warning("Hãy nhập từ khóa tìm kiếm!")
-
-# ================= UI SECTION 2: ADD BY CHANNEL ID =================
-st.markdown("---")
-st.subheader("🔗 Thêm bằng Channel ID")
-
-channel_id_input = st.text_input("Nhập Channel ID (bắt đầu bằng UC...)")
-
-if st.button("➕ Thêm kênh"):
-    if channel_id_input.strip():
-        with st.spinner("Đang tải thông tin kênh..."):
-            channel_info = get_channel_by_channel_id(channel_id_input)
-            
-            if channel_info:
-                col1, col2 = st.columns([1, 3])
-                
-                with col1:
-                    st.image(channel_info['thumbnail'], width=150)
-                
-                with col2:
-                    st.write(f"**Tên kênh:** {channel_info['channel_name']}")
-                    st.write(f"**Subscribers:** {channel_info['subscriber_count']:,}")
-                    st.write(f"**Total Views:** {channel_info['total_views']:,}")
-                    st.write(f"**Total Videos:** {channel_info['total_videos']:,}")
-                
-                if st.button("✅ Xác nhận thêm kênh"):
-                    if save_channel_to_bigquery(channel_info):
-                        st.success(f"✅ Đã thêm kênh '{channel_info['channel_name']}' vào hệ thống!")
-                        st.session_state.selected_channel_id = channel_info['channel_id']
-                        st.session_state.selected_channel_name = channel_info['channel_name']
-                        st.rerun()
-                    else:
-                        st.info("ℹ️ Kênh đã tồn tại hoặc không thể lưu vào hệ thống.")
-            else:
-                st.error("❌ Không tìm thấy kênh với ID này!")
-    else:
-        st.warning("Hãy nhập Channel ID!")
-
-# ================= UI SECTION 3: MANAGE CHANNELS =================
-st.markdown("---")
-st.subheader("📋 Danh sách kênh đã thêm")
-
-# Show channels from CSV
-with st.expander("📂 Danh sách từ file config (channels.csv)", expanded=False):
-    csv_df = load_channels_from_csv()
-    if not csv_df.empty:
-        # Format display dataframe
-        display_csv_df = csv_df.copy()
-        if 'subscriber_count' in display_csv_df.columns:
-            display_csv_df['subscriber_count'] = display_csv_df['subscriber_count'].apply(lambda x: f"{x:,}")
-            display_csv_df['total_views'] = display_csv_df['total_views'].apply(lambda x: f"{x:,}")
-        st.dataframe(display_csv_df, width='stretch')
-        st.caption(f"📊 Tổng cộng từ CSV: {len(csv_df)} kênh")
-    else:
-        st.info("📭 File danh sách chưa có kênh nào.")
-
-# Show channels from BigQuery
-st.write("**Danh sách từ BigQuery:**")
-
-if BIGQUERY_AVAILABLE:
-    try:
-        query = """
-        SELECT channel_id, channel_name, subscriber_count, total_views, total_videos, extracted_at
-        FROM `project-8fd99edc-9e20-4b82-b43.raw.raw_channels`
-        ORDER BY extracted_at DESC
-        LIMIT 50
-        """
-        channels_df = client.query(query).to_dataframe()
+# Hiển thị kết quả tìm kiếm đã lưu
+if st.session_state.search_results:
+    st.subheader("📺 Kết quả tìm kiếm")
+    
+    for i, channel in enumerate(st.session_state.search_results, 1):
+        col_left, col_right = st.columns([2, 3])
         
-        if not channels_df.empty:
-            display_df = channels_df.copy()
-            display_df['subscriber_count'] = display_df['subscriber_count'].apply(lambda x: f"{x:,}")
-            display_df['total_views'] = display_df['total_views'].apply(lambda x: f"{x:,}")
-            display_df['extracted_at'] = pd.to_datetime(display_df['extracted_at']).dt.strftime('%d/%m/%Y %H:%M')
+        with col_left:
+            if channel['thumbnail']:
+                st.image(channel['thumbnail'], width=200)
+        
+        with col_right:
+            st.markdown(f"### {i}. {channel['channel_name']}")
+            st.markdown(f"**Channel ID:** `{channel['channel_id']}`")
+            st.markdown(f"**Subscribers:** {channel['subscriber_count']:,}")
+            st.markdown(f"**Total Views:** {channel['total_views']:,}")
+            st.markdown(f"**Total Videos:** {channel['total_videos']:,}")
+            description_text = channel.get('description') or ''
+            st.markdown(f"**Description:** {(description_text[:150] + '...') if description_text else '(Không có mô tả)'}")
             
-            st.dataframe(display_df, width='stretch')
-            st.caption(f"📊 Tổng cộng: {len(channels_df)} kênh")
+            # Kiểm tra kênh đã tồn tại hay chưa
+            channels_df = load_channels_csv()
+            existing_row = channels_df[channels_df['channel_id'] == channel['channel_id']]
+            exists = not existing_row.empty
+            
+            # Hiển thị thông báo nếu kênh đã có trong danh sách
+            if exists:
+                existing_info = existing_row.iloc[0]
+                st.warning(
+                    f"⚠️ **Kênh này đã có trong danh sách!**\n\n"
+                    f"- Được thêm lúc: #ID {int(existing_info['num_id'])}\n"
+                    f"- Subscribers hiện tại: {safe_int(existing_info['subscriber_count']):,}\n"
+                    f"- Views: {safe_int(existing_info['total_views']):,}\n\n"
+                    f"Nhấn nút dưới để **cập nhật** thông tin mới nhất từ YouTube."
+                )
+            else:
+                st.info(
+                    "✨ **Đây là một kênh mới!**\n\n"
+                    "Kênh này chưa có trong danh sách. Nhấn nút dưới để thêm vào."
+                )
+            
+            button_label = "♻️ Cập nhật thông tin" if exists else "✅ Thêm kênh này"
+            
+            if st.button(button_label, key=f"add_btn_{i}", use_container_width=True):
+                if add_or_update_channel_csv(channel):
+                    # Đánh dấu đã thêm/cập nhật để làm mới danh sách
+                    st.session_state.channel_added = True
+                    # Xóa kết quả tìm kiếm ngay lập tức
+                    st.session_state.search_results = []
+                    st.session_state.last_search_keyword = ""
+                    # Chạy lại để cập nhật danh sách
+                    st.rerun()
+        
+        st.divider()
+
+
+# ================= PHẦN GIAO DIỆN 3: QUẢN LÝ KÊNH =================
+st.markdown("---")
+
+# Header và nút nằm cùng một hàng
+col_header, col_button = st.columns([3, 1])
+
+with col_header:
+    st.subheader("📋 Danh sách kênh đã thêm")
+
+with col_button:
+    st.write("")  # Khoảng đệm để căn hàng
+    st.write("")  # Khoảng đệm để căn hàng
+    refresh_clicked = st.button("🔄 Cập nhật thống kê", use_container_width=True)
+
+# Hiển thị thông báo thành công nếu vừa thêm/cập nhật kênh
+if st.session_state.channel_added:
+    st.success("🎉 Kênh đã được thêm/cập nhật thành công! Danh sách dưới đây đã cập nhật.")
+    st.session_state.channel_added = False
+
+try:
+    channels_df = load_channels_csv()
+    
+    if not channels_df.empty:
+        # Lọc bỏ các dòng có channel_id trống
+        channels_df_filtered = channels_df[channels_df['channel_id'].notna() & (channels_df['channel_id'] != '')]
+        
+        if not channels_df_filtered.empty:
+            display_df = channels_df_filtered.copy()
+            # Định dạng số để hiển thị
+            display_df['subscriber_count'] = display_df['subscriber_count'].apply(lambda x: f"{safe_int(x):,}")
+            display_df['total_views'] = display_df['total_views'].apply(lambda x: f"{safe_int(x):,}")
+            
+            st.dataframe(display_df, use_container_width=True)
+            st.caption(f"📊 Tổng cộng: {len(channels_df_filtered)} kênh")
+            
+            # Xử lý khi bấm nút cập nhật thống kê
+            if refresh_clicked:
+                st.info("⏳ Đang cập nhật thông tin từ YouTube...")
+                updated_count = 0
+                
+                for idx, row in channels_df_filtered.iterrows():
+                    channel_id = row['channel_id']
+                    channel_info = get_channel_by_channel_id(channel_id)
+                    
+                    if channel_info:
+                        # Cập nhật dòng dữ liệu tương ứng
+                        channels_df.at[idx, 'subscriber_count'] = channel_info['subscriber_count']
+                        channels_df.at[idx, 'total_views'] = channel_info['total_views']
+                        channels_df.at[idx, 'total_videos'] = channel_info['total_videos']
+                        updated_count += 1
+                
+                save_channels_csv(channels_df)
+                st.success(f"✅ Đã cập nhật {updated_count} kênh")
+                st.rerun()
         else:
             st.info("📭 Chưa có kênh nào được thêm vào hệ thống.")
-    except Exception as e:
-        error_msg = str(e)
-        if "not found" in error_msg.lower():
-            st.warning(f"⚠️ BigQuery dataset chưa được tạo.")
-        else:
-            st.warning(f"⚠️ Không thể tải danh sách: {error_msg[:80]}")
-else:
-    st.info("ℹ️ BigQuery không khả dụng. Sử dụng CSV để lưu thay thế.")
+    else:
+        st.info("📭 Chưa có kênh nào được thêm vào hệ thống.")
+        
+except Exception as e:
+    st.error(f"❌ Lỗi tải danh sách kênh: {str(e)}")
 
-# ================= FOOTER =================
+# ================= CHÂN TRANG =================
 st.markdown("---")
 st.caption("YouTube Analytics Pipeline • Channel Management")

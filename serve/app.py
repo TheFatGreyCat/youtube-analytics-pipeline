@@ -1,6 +1,5 @@
 import streamlit as st
 import pandas as pd
-from google.cloud import bigquery
 import plotly.express as px
 import plotly.graph_objects as go
 from googleapiclient.discovery import build
@@ -8,24 +7,46 @@ from datetime import datetime, timedelta
 import numpy as np
 import os
 
-# ================== CONFIG ==================
+# ================== CẤU HÌNH ==================
 st.set_page_config(page_title="YouTube Analytics Dashboard", layout="wide")
 
-# YouTube API setup
-API_KEY = "AIzaSyC0gDJ5ipTodDrMGHF2-Zg0qMftp_2UY6E"
-youtube = build("youtube", "v3", developerKey=API_KEY)
+# Cấu hình YouTube API
+# Nạp file .env khi chạy local để sử dụng biến môi trường
+from dotenv import load_dotenv
+project_root = os.path.abspath(os.path.dirname(os.path.dirname(__file__)))
+load_dotenv(os.path.join(project_root, '.env'))
 
-# ================== TITLE ==================
+YOUTUBE_API_KEY = os.getenv('YOUTUBE_API_KEY')
+
+# Đảm bảo có API key trước khi khởi tạo client
+if not YOUTUBE_API_KEY:
+    st.error("🔑 YouTube API key not found. Please set the YOUTUBE_API_KEY environment variable or add it to your .env file.")
+    st.stop()
+
+# Khởi tạo YouTube service object, xử lý fallback xác thực ngoài ý muốn
+try:
+    youtube = build("youtube", "v3", developerKey=YOUTUBE_API_KEY)
+except Exception as err:
+    # Nếu thư viện vẫn thử dùng ADC và thất bại, hiển thị thông báo thân thiện
+    st.error(
+        "❌ Failed to initialise YouTube client. "
+        "Ensure your API key is valid and you have network access. "
+        f"Error details: {err}"
+    )
+    st.stop()
+
+# ================== TIÊU ĐỀ ==================
 st.title("📊 YouTube Analytics Dashboard")
 st.caption("Phân tích chi tiết dữ liệu YouTube")
 
-# ================== CHANNEL FROM SEARCH ==================
-if "selected_channel_id" not in st.session_state:
-    st.warning("🔎 Hãy tìm và chọn một kênh trước.")
-    st.stop()
-
-channel_id = st.session_state.selected_channel_id
+# ================== KÊNH ĐƯỢC CHỌN TỪ TÌM KIẾM ==================
+channel_id = st.session_state.get("selected_channel_id")
 channel_name = st.session_state.get("selected_channel_name", "Unknown")
+
+if not channel_id:
+    st.warning("🔎 Hãy tìm và chọn một kênh trước.")
+    st.switch_page("pages/1_Channel_Search.py")
+    st.stop()
 
 st.success(f"🎯 Đang phân tích kênh: {channel_name}")
 st.write(f"Channel ID: {channel_id}")
@@ -36,20 +57,15 @@ with col_refresh:
     if st.button("🔄 Refresh", help="Cập nhật dữ liệu từ YouTube"):
         st.rerun()
 
-# ================== BIGQUERY CLIENT ==================
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-credentials_path = os.path.join(
-    BASE_DIR,
-    "credentials",
-    "project-8fd99edc-9e20-4b82-b43-41fc5f2ccbcd.json"
-)
+# ================== HÀM HỖ TRỢ ==================
 
-client = bigquery.Client.from_service_account_json(
-    credentials_path,
-    project="project-8fd99edc-9e20-4b82-b43"
-)
-
-# ================== HELPER FUNCTIONS ==================
+def safe_int(value, default=0):
+    try:
+        if value is None or value == "":
+            return default
+        return int(value)
+    except (TypeError, ValueError):
+        return default
 
 def calculate_engagement_rate(likes, comments, views):
     """Tính tỉ lệ engagement"""
@@ -92,9 +108,9 @@ def get_channel_stats(channel_id):
             stats = response["items"][0]["statistics"]
             snippet = response["items"][0]["snippet"]
             return {
-                "subscriber_count": int(stats.get("subscriberCount", 0)),
-                "total_views": int(stats.get("viewCount", 0)),
-                "total_videos": int(stats.get("videoCount", 0)),
+                "subscriber_count": safe_int(stats.get("subscriberCount", 0)),
+                "total_views": safe_int(stats.get("viewCount", 0)),
+                "total_videos": safe_int(stats.get("videoCount", 0)),
                 "thumbnail": snippet.get("thumbnails", {}).get("high", {}).get("url", "")
             }
     except Exception as e:
@@ -133,20 +149,20 @@ def get_channel_videos(channel_id):
                     "video_id": video_id,
                     "title": snippet.get("title", ""),
                     "published_at": snippet.get("publishedAt", ""),
-                    "view_count": int(stats.get("viewCount", 0)),
-                    "like_count": int(stats.get("likeCount", 0)),
-                    "comment_count": int(stats.get("commentCount", 0))
+                    "view_count": safe_int(stats.get("viewCount", 0)),
+                    "like_count": safe_int(stats.get("likeCount", 0)),
+                    "comment_count": safe_int(stats.get("commentCount", 0))
                 })
         
         df = pd.DataFrame(videos) if videos else pd.DataFrame()
-        # verify video-level calculations for accuracy
+        # Xác minh tính toán ở cấp video để đảm bảo độ chính xác
         if not df.empty:
-            # calculate engagement rate and compare
+            # Tính engagement rate và so sánh
             df['engagement_rate'] = df.apply(
                 lambda r: calculate_engagement_rate(r['like_count'], r['comment_count'], r['view_count']),
                 axis=1
             )
-            # manual formula and tolerance
+            # Công thức thủ công và ngưỡng sai số cho phép
             diffs = df.apply(
                 lambda r: abs(r['engagement_rate'] - ((r['like_count'] + r['comment_count']) / (r['view_count'] if r['view_count']>0 else 1) * 100)),
                 axis=1
@@ -158,7 +174,7 @@ def get_channel_videos(channel_id):
         st.error(f"❌ Lỗi khi lấy video: {str(e)}")
         return pd.DataFrame()
 
-# ================== LOAD DATA ==================
+# ================== NẠP DỮ LIỆU ==================
 channel_stats = get_channel_stats(channel_id)
 videos_df = get_channel_videos(channel_id)
 
@@ -166,7 +182,7 @@ if channel_stats is None:
     st.error("❌ Không thể lấy dữ liệu cho kênh này.")
     st.stop()
 
-# ================== SECTION 1: KPI CARDS ==================
+# ================== PHẦN 1: THẺ KPI ==================
 st.subheader("📌 Chỉ số tổng quan")
 col1, col2, col3, col4 = st.columns(4)
 
@@ -174,17 +190,17 @@ col1.metric("👥 Subscribers", f"{channel_stats['subscriber_count']:,}")
 col2.metric("👁️ Total Views", f"{channel_stats['total_views']:,}")
 col3.metric("🎬 Total Videos", f"{channel_stats['total_videos']:,}")
 
-# Tính average views per video
+# Tính lượt xem trung bình mỗi video
 avg_views = channel_stats['total_views'] // max(channel_stats['total_videos'], 1)
 col4.metric("📊 Avg Views/Video", f"{avg_views:,}")
 
-# ================== SECTION 2: CHANNEL THUMBNAIL ==================
+# ================== PHẦN 2: ẢNH ĐẠI DIỆN KÊNH ==================
 if channel_stats["thumbnail"]:
     col_img, col_space = st.columns([1, 4])
     with col_img:
         st.image(channel_stats["thumbnail"], width=150)
 
-# ================== SECTION 3: VIDEO ANALYTICS ==================
+# ================== PHẦN 3: PHÂN TÍCH VIDEO ==================
 st.markdown("---")
 st.subheader("📈 Phân tích Video")
 
@@ -268,11 +284,11 @@ if not videos_df.empty:
         )
         st.plotly_chart(fig2, use_container_width=True)
 
-# ================== SECTION 4: ADVANCED METRICS ==================
+# ================== PHẦN 4: CHỈ SỐ NÂNG CAO ==================
 st.markdown("---")
 st.subheader("📊 Chỉ số nâng cao")
 
-# Provide user-friendly explanations for each metric
+# Cung cấp giải thích dễ hiểu cho từng chỉ số
 st.markdown("""
 **Giải thích các chỉ số:**
 
@@ -290,14 +306,14 @@ if not videos_df.empty:
     col_m1.metric("Engagement trung bình", f"{avg_engagement:.2f}%")
     col_m1.write("(Likes+Comments)/Views * 100")
     
-    # Like rate
+    # Tỷ lệ Like
     total_likes = videos_df['like_count'].sum()
     total_views = videos_df['view_count'].sum()
     like_rate = (total_likes / total_views * 100) if total_views > 0 else 0
     col_m2.metric("Tỷ lệ Like", f"{like_rate:.2f}%")
     col_m2.write("Likes / Views * 100")
     
-    # Comment rate
+    # Tỷ lệ Comment
     total_comments = videos_df['comment_count'].sum()
     comment_rate = (total_comments / total_views * 100) if total_views > 0 else 0
     col_m3.metric("Tỷ lệ Comment", f"{comment_rate:.2f}%")
@@ -306,10 +322,10 @@ if not videos_df.empty:
     # Video với engagement cao nhất
     if not videos_df.empty:
         best_video = videos_df.loc[videos_df['engagement_rate'].idxmax()]
-        col_m4.metric("Video tốt nhất", best_video['title'][:30] + "...")
+        col_m4.metric("Video tốt nhất", str(best_video['title'])[:30] + "...")
         col_m4.write("Dựa trên engagement rate cao nhất")
 
-# ================== FOOTER ==================
+# ================== CHÂN TRANG ==================
 st.markdown("---")
 st.caption("YouTube Analytics Pipeline • Streamlit • Powered by YouTube Data API")
 st.markdown("---")
