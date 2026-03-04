@@ -69,6 +69,37 @@ def save_channels_csv(df):
     df.to_csv(CSV_PATH, index=False)
     st.success(f"✅ Đã lưu vào {CSV_PATH}")
 
+def save_channels_template_entry(num_id, channel_name):
+    """Ghi num_id và channel_name vào channels_template.csv"""
+    template_cols = ['num_id', 'channel_name']
+    if os.path.exists(TEMPLATE_CSV_PATH):
+        try:
+            template_df = pd.read_csv(TEMPLATE_CSV_PATH)
+        except Exception:
+            template_df = pd.DataFrame(columns=template_cols)
+    else:
+        template_df = pd.DataFrame(columns=template_cols)
+
+    for col in template_cols:
+        if col not in template_df.columns:
+            template_df[col] = ''
+
+    template_df = template_df[template_cols]
+
+    match_idx = template_df[template_df['num_id'].astype(str) == str(num_id)].index
+    if len(match_idx) > 0:
+        template_df.at[match_idx[0], 'channel_name'] = channel_name
+    else:
+        new_template_row = pd.DataFrame([{
+            'num_id': num_id,
+            'channel_name': channel_name,
+        }])
+        template_df = pd.concat([template_df, new_template_row], ignore_index=True)
+
+    template_df['num_id'] = pd.to_numeric(template_df['num_id'], errors='coerce').fillna(0).astype(int)
+    template_df = template_df.sort_values(by='num_id', ascending=True, kind='stable')
+    template_df.to_csv(TEMPLATE_CSV_PATH, index=False)
+
 def get_channel_by_channel_id(channel_id):
     """Lấy thông tin kênh bằng Channel ID"""
     try:
@@ -159,6 +190,7 @@ def add_or_update_channel_csv(channel_info):
             
             channels_df = pd.concat([channels_df, new_row], ignore_index=True)
             save_channels_csv(channels_df)
+            save_channels_template_entry(new_id, channel_info["channel_name"])
             return True
             
     except Exception as e:
@@ -255,11 +287,26 @@ if st.session_state.search_results:
 # ================= PHẦN GIAO DIỆN 3: QUẢN LÝ KÊNH =================
 st.markdown("---")
 
-# Header và nút nằm cùng một hàng
-col_header, col_button = st.columns([3, 1])
+# Header, bộ lọc sắp xếp và nút nằm cùng một hàng
+col_header, col_sort, col_button = st.columns([2.2, 1.3, 1])
 
 with col_header:
     st.subheader("📋 Danh sách kênh đã thêm")
+
+with col_sort:
+    st.write("")
+    newest_first_label = "Mới thêm gần đây (ID giảm dần)"
+    if st.session_state.channel_added:
+        st.session_state.channel_sort_option = newest_first_label
+    sort_option = st.selectbox(
+        "Sắp xếp",
+        [
+            newest_first_label,
+            "Subscriber giảm dần",
+            "Views giảm dần",
+        ],
+        key="channel_sort_option",
+    )
 
 with col_button:
     st.write("")  # Khoảng đệm để căn hàng
@@ -279,7 +326,20 @@ try:
         channels_df_filtered = channels_df[channels_df['channel_id'].notna() & (channels_df['channel_id'] != '')]
         
         if not channels_df_filtered.empty:
-            display_df = channels_df_filtered.copy()
+            sorted_df = channels_df_filtered.copy()
+            for col in ['num_id', 'subscriber_count', 'total_views', 'total_videos']:
+                sorted_df[col] = pd.to_numeric(sorted_df[col], errors='coerce').fillna(0)
+
+            sort_config = {
+                "Mới thêm gần đây (ID giảm dần)": ("num_id", False),
+                "Subscriber giảm dần": ("subscriber_count", False),
+                "Views giảm dần": ("total_views", False),
+            }
+
+            sort_col, ascending = sort_config[sort_option]
+            sorted_df = sorted_df.sort_values(by=sort_col, ascending=ascending, kind='stable')
+
+            display_df = sorted_df.copy()
             # Định dạng số để hiển thị
             display_df['subscriber_count'] = display_df['subscriber_count'].apply(lambda x: f"{safe_int(x):,}")
             display_df['total_views'] = display_df['total_views'].apply(lambda x: f"{safe_int(x):,}")
