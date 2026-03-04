@@ -2,7 +2,6 @@
 -- Purpose: Crawl scheduling, execution logs, API quota tracking
 -- Data Storage: All YouTube data goes to BigQuery
 
--- METADATA & CONFIG TABLES
 CREATE TABLE IF NOT EXISTS channels_config (
     channel_id VARCHAR(100) PRIMARY KEY,
     channel_name VARCHAR(255) NOT NULL,
